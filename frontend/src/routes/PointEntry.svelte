@@ -17,12 +17,14 @@
     pointList,
     pointRows,
     pointsOfDevice,
+    rejectedImportResult,
     removePoint,
     setActiveDevice,
-    updatePoint
+    updatePoint,
+    type PointImportResult
   } from '$lib/stores/pointStore.ts'
   import { buildingById, deviceList, selectBuilding } from '$lib/stores/buildingStore.ts'
-  import { parsePointPaste } from '$lib/types/point.ts'
+  import { normalizePointCode, parsePointPaste } from '$lib/types/point.ts'
   import type { Point, PointPasteRow } from '$lib/types/point.ts'
   import { DEVICE_TYPES } from '$lib/types/device.ts'
   import type { DeviceType } from '$lib/types/device.ts'
@@ -56,6 +58,8 @@
   let showPaste = $state(false)
   let pasteErrors = $state<string[]>([])
   let pastePreview = $state<PointPasteRow[]>([])
+  /** 最近一次手记合并导入结果（用于页面顶部汇总新增 / 更新 / 保留 / 未受理） */
+  let importResult = $state<PointImportResult | null>(null)
   let bulkValue = $state<number | null>(null)
 
   let form = $state<PointForm>({
@@ -195,6 +199,37 @@
     showPaste = true
   }
 
+  /** 预览行在当前装置上的落地动作：新增 / 更新（标注实测或限值是否变化）/ 保留（无变化） */
+  const pastePlan = $derived(
+    pastePreview.map((row) => {
+      const points = $activeDeviceId ? pointsOfDevice($activeDeviceId) : []
+      const old = points.find((point) => normalizePointCode(point.code) === normalizePointCode(row.code)) ?? null
+      const effectiveLimit = row.limitSpecified && row.limitOhm !== null ? row.limitOhm : defaultLimit
+      const location = old ? (row.location === '' ? old.location : row.location) : row.location
+      const valueChanged = old ? old.measuredOhm !== row.measuredOhm || old.limitOhm !== effectiveLimit : false
+      const locationChanged = old ? location !== old.location : false
+      return {
+        row,
+        old,
+        action: old === null ? '新增' : valueChanged || locationChanged ? '更新' : '保留',
+        effectiveLimit,
+        location,
+        valueChanged
+      }
+    })
+  )
+
+  const pastePlanCounts = $derived(
+    (() => {
+      const existingCount = $activeDeviceId ? pointsOfDevice($activeDeviceId).length : 0
+      const created = pastePlan.filter((item) => item.action === '新增').length
+      const updated = pastePlan.filter((item) => item.action === '更新').length
+      // 现有测点要么被更新（有字段变化），要么保留（命中但无变化 + 粘贴未出现的旧点）
+      const retained = existingCount - updated
+      return { created, updated, retained }
+    })()
+  )
+
   function previewPaste(): void {
     const parsed = parsePointPaste($pasteText, defaultLimit)
     pasteErrors = parsed.errors
@@ -206,16 +241,27 @@
     const parsed = parsePointPaste($pasteText, defaultLimit)
     pasteErrors = parsed.errors
     pastePreview = parsed.rows
+    if (parsed.errors.length > 0) {
+      // 同批重复编号或任一行格式、数值有错：列出冲突行且不写任何数据
+      importResult = rejectedImportResult(parsed.lineCount, pointsOfDevice($activeDeviceId).length)
+      window.alert('粘贴内容存在格式 / 数值错误或同批编号重复，已整批未受理、未写入任何测点，请按提示修正后重试。')
+      return
+    }
     if (parsed.rows.length === 0) return
+    const plan = pastePlan
+    const changedCount = plan.filter((item) => item.valueChanged).length
     const ok = window.confirm(
-      `将用 ${parsed.rows.length} 行数据替换该装置现有 ${pointsOfDevice($activeDeviceId).length} 个测点，确认导入？`
+      `将把 ${parsed.rows.length} 行手记合并进当前装置：新增 ${pastePlanCounts.created} 点、更新 ${pastePlanCounts.updated} 点、` +
+        `保留旧测点 ${pastePlanCounts.retained} 点，不会删除未出现的测点。` +
+        (changedCount > 0 ? `其中 ${changedCount} 点实测或限值变化，将撤销其已确认判定并回退为待确认初判。` : '') +
+        '确认导入？'
     )
     if (!ok) return
-    await importPointRows($activeDeviceId, parsed.rows, {
+    importResult = await importPointRows($activeDeviceId, parsed.rows, {
       meter: pointsOfDevice($activeDeviceId)[0]?.meter ?? '未填写',
       measureDate: new Date().toISOString().slice(0, 10)
     })
-    showPaste = false
+    if (importResult.applied) showPaste = false
   }
 
   function handleFilterChange(next: FilterChange): void {
@@ -287,6 +333,27 @@
     <StatBadge label="合格率" value={totals.rate} percent={totals.rate} tone="success" />
     <StatBadge label="选中装置测点" value={totals.activeDevicePoints} suffix="点" tone="info" />
   </div>
+
+  {#if importResult}
+    <div class="gb-panel import-summary" class:is-rejected={!importResult.applied}>
+      <div class="import-summary__head">
+        <strong>{importResult.applied ? '手记已合并导入' : '整批未受理（未写入任何测点）'}</strong>
+        <button class="link" type="button" onclick={() => (importResult = null)}>关闭</button>
+      </div>
+      <div class="gb-stats-row">
+        <StatBadge label="新增" value={importResult.created} suffix="点" tone="primary" />
+        <StatBadge label="更新" value={importResult.updated} suffix="点" tone="info" />
+        <StatBadge label="保留" value={importResult.retained} suffix="点" tone="success" />
+        <StatBadge label="未受理" value={importResult.rejected} suffix="行" tone={importResult.rejected > 0 ? 'danger' : 'default'} />
+      </div>
+      {#if importResult.revokedVerdictCodes.length > 0}
+        <p class="gb-danger">
+          实测或限值变化，已撤销 {importResult.revokedVerdictCodes.length} 个测点的判定确认并回退为待确认初判：
+          {importResult.revokedVerdictCodes.join('、')}
+        </p>
+      {/if}
+    </div>
+  {/if}
 
   {#if $activeDeviceId}
     <div class="gb-panel">
@@ -443,9 +510,13 @@
       </div>
       <div class="gb-modal__body">
         <p class="gb-hint">
-          每行一条，格式「测点编号,位置,实测电阻[,限值]」，逗号 / 制表符 / 分号均可。示例：<br />
+          每行一条，格式「测点编号,位置,实测电阻[,限值]」，逗号 / 制表符 / 分号均可；位置可留空（留空保留原位置）。示例：<br />
           <span class="gb-mono">JD-07,罐区东侧测试井,3.8,4</span><br />
-          <span class="gb-mono">JD-08;罐区西侧测试井;5.6;4</span>
+          <span class="gb-mono">JD-08;罐区西侧测试井;5.6;</span>（限值留空，按当前防雷类别与装置类型重算）
+        </p>
+        <p class="gb-hint">
+          按编号合并进当前装置：同编号更新位置、实测与限值；编号去首尾空格、忽略大小写匹配；粘贴里没有的旧测点保留不删。
+          同批重复编号或任一行格式、数值有错时整批不写入。
         </p>
         <label class="gb-field">
           <span>粘贴内容</span>
@@ -463,18 +534,31 @@
             {/each}
           </div>
         {/if}
-        {#if pastePreview.length > 0}
+        {#if pastePreview.length > 0 && pasteErrors.length === 0}
+          <p class="gb-hint">
+            本次将新增 <strong>{pastePlanCounts.created}</strong> 点、更新 <strong>{pastePlanCounts.updated}</strong> 点、
+            保留现有测点 <strong>{pastePlanCounts.retained}</strong> 点；建议限值 {defaultLimit} Ω。
+          </p>
           <table class="gb-table">
             <thead>
-              <tr><th>编号</th><th>位置</th><th class="is-num">实测</th><th class="is-num">限值</th></tr>
+              <tr><th>编号</th><th>位置</th><th class="is-num">实测</th><th class="is-num">限值</th><th>动作</th></tr>
             </thead>
             <tbody>
-              {#each pastePreview as row, index (index)}
+              {#each pastePlan as item (item.row.lineNo)}
                 <tr>
-                  <td class="gb-mono">{row.code}</td>
-                  <td>{row.location}</td>
-                  <td class="is-num gb-mono">{row.measuredOhm}</td>
-                  <td class="is-num gb-mono">{row.limitOhm}</td>
+                  <td class="gb-mono">{item.row.code}</td>
+                  <td>
+                    {#if item.location}{item.location}{:else}<span class="gb-hint">（保留原位置）</span>{/if}
+                  </td>
+                  <td class="is-num gb-mono">{item.row.measuredOhm}</td>
+                  <td class="is-num gb-mono">
+                    {item.effectiveLimit}
+                    {#if !item.row.limitSpecified}<span class="gb-hint"> 默认</span>{/if}
+                  </td>
+                  <td>
+                    <span class="gb-tag">{item.action}</span>
+                    {#if item.valueChanged}<span class="gb-danger"> 撤销确认</span>{/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -484,7 +568,7 @@
       <div class="gb-modal__foot">
         <button class="btn" type="button" onclick={() => (showPaste = false)}>取消</button>
         <button class="btn" type="button" onclick={previewPaste}>解析预览</button>
-        <button class="btn btn--primary" type="button" onclick={submitPaste}>覆盖导入</button>
+        <button class="btn btn--primary" type="button" onclick={submitPaste}>合并导入</button>
       </div>
     </div>
   </div>
@@ -540,6 +624,23 @@
     gap: 6px;
     max-height: 160px;
     overflow: auto;
+  }
+
+  .import-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .import-summary.is-rejected {
+    border-color: #e5484d;
+  }
+
+  .import-summary__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
   }
 
   .link {

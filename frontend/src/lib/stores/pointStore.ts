@@ -7,10 +7,12 @@
  */
 import { derived, get, writable } from 'svelte/store'
 import { db, watchTable } from '$lib/utils/db'
-import type { Point, PointDraft } from '$lib/types/point'
-import { createEmptyPointDraft } from '$lib/types/point'
-import { deviceList } from '$lib/stores/buildingStore'
-import { isQualified, limitRatio } from '$lib/utils/resistance'
+import type { Point, PointDraft, PointPasteRow } from '$lib/types/point'
+import { createEmptyPointDraft, normalizePointCode } from '$lib/types/point'
+import { buildingById, deviceList } from '$lib/stores/buildingStore'
+import { defaultBasis, judgePoint } from '$lib/types/verdict'
+import type { Verdict } from '$lib/types/verdict'
+import { isQualified, limitRatio, suggestLimitOhm } from '$lib/utils/resistance'
 
 /** 响应式测点集合 */
 export const pointList = writable<Point[]>([])
@@ -110,30 +112,178 @@ export async function bulkSetMeasured(deviceId: string, measuredOhm: number): Pr
   return pointsOfDevice(deviceId).length
 }
 
-/** 批量导入解析后的粘贴行（替换该装置原有测点） */
+/** 手记合并导入结果：新增 / 更新 / 保留 / 未受理数量与明细 */
+export interface PointImportResult {
+  /** 台账中不存在、本次新建的测点数 */
+  created: number
+  /** 按编号命中台账、本次改写了位置 / 实测 / 限值的测点数（编号命中但无字段变化计入 retained） */
+  updated: number
+  /** 未被触碰的测点数：粘贴中未出现的旧测点 + 命中但实测/限值/位置均无变化的测点 */
+  retained: number
+  /** 未受理行数：解析冲突 / 格式数值错误导致整批未写入时为粘贴行数，成功写入后为 0 */
+  rejected: number
+  /** 是否真正写入（false 表示整批未受理） */
+  applied: boolean
+  createdCodes: string[]
+  updatedCodes: string[]
+  retainedCodes: string[]
+  /** 实测或限值变化、已撤销检测人确认、回退为自动初判待确认的测点编号 */
+  revokedVerdictCodes: string[]
+}
+
+/**
+ * 按编号把手记合并导入指定装置（不再整装置替换）。
+ *
+ * - 编号去首尾空格、忽略大小写后与该装置现有测点匹配；同编号更新位置、实测与限值。
+ * - 粘贴行未写限值时，按当前装置所属建筑物防雷类别与装置类型重算建议限值。
+ * - 粘贴位置为空时保留原位置，不抹掉。
+ * - 实测或限值发生变化：判定结果与依据按新值重算，已确认的撤销确认（回退为待确认初判），
+ *   未确认的仅刷新初判；仅位置变化或数据无变化时保留原判定（含确认状态）。
+ * - 新测点自动生成一条待确认的初判记录；粘贴中未出现的旧测点原样留在台账。
+ * - 调用方须先用 parsePointPaste 校验，errors 非空时不要调用本函数。
+ */
 export async function importPointRows(
   deviceId: string,
-  rows: Array<{ code: string; location: string; measuredOhm: number; limitOhm: number }>,
+  rows: PointPasteRow[],
   meta: { meter: string; measureDate: string }
-): Promise<number> {
+): Promise<PointImportResult> {
+  const device = get(deviceList).find((item) => item.id === deviceId)
+  const building = device ? buildingById(device.buildingId) : null
+  const recomputedLimit = suggestLimitOhm(building?.protectionClass ?? '三类', device?.type ?? '接地体')
+
+  const existing = pointsOfDevice(deviceId)
+  const existingByCode = new Map(existing.map((point) => [normalizePointCode(point.code), point]))
+
+  const pointsToPut: Point[] = []
+  const verdictsToPut: Verdict[] = []
+  const createdCodes: string[] = []
+  const updatedCodes: string[] = []
+  /** 保留：编号命中但无字段变化的测点 + 粘贴中未出现的旧测点 */
+  const retainedCodes: string[] = []
+  const revokedCodes: string[] = []
+  /** 粘贴中命中（含更新与无变化）的旧测点 id，用于识别完全未出现的旧测点 */
+  const matchedIds = new Set<string>()
   const now = Date.now()
-  const records: Point[] = rows.map((row, index) => ({
-    id: `pnt_${Date.now().toString(36)}${index}${Math.random().toString(36).slice(2, 6)}`,
-    deviceId,
-    code: row.code,
-    location: row.location,
-    measuredOhm: row.measuredOhm,
-    limitOhm: row.limitOhm,
-    meter: meta.meter,
-    measureDate: meta.measureDate,
-    createdAt: now + index,
-    updatedAt: now + index
-  }))
+
+  // 在同一事务内先取本次可能命中的测点判定，再逐行合并，保证读到的是最新确认状态
+  const protectionClass = building?.protectionClass ?? '三类'
+  const deviceType = device?.type ?? '接地体'
+
   await db.transaction('rw', [db.points, db.verdicts], async () => {
-    const oldIds = (await db.points.where('deviceId').equals(deviceId).toArray()).map((row) => row.id)
-    if (oldIds.length > 0) await db.verdicts.where('pointId').anyOf(oldIds).delete()
-    await db.points.where('deviceId').equals(deviceId).delete()
-    await db.points.bulkPut(records)
+    // Dexie 的 anyOf 不接受空数组：装置尚无旧测点时没有判定可查
+    const existingVerdicts =
+      existing.length === 0
+        ? []
+        : await db.verdicts.where('pointId').anyOf(existing.map((point) => point.id)).toArray()
+    const verdictByPoint = new Map(existingVerdicts.map((verdict) => [verdict.pointId, verdict]))
+
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      const effectiveLimit = row.limitSpecified && row.limitOhm !== null ? row.limitOhm : recomputedLimit
+      const old = existingByCode.get(normalizePointCode(row.code))
+
+      if (!old) {
+        const id = `pnt_${now.toString(36)}${index}${Math.random().toString(36).slice(2, 6)}`
+        pointsToPut.push({
+          id,
+          deviceId,
+          code: row.code.trim(),
+          location: row.location,
+          measuredOhm: row.measuredOhm,
+          limitOhm: effectiveLimit,
+          meter: meta.meter,
+          measureDate: meta.measureDate,
+          createdAt: now + index,
+          updatedAt: now + index
+        })
+        // 新测点给一条待检测人确认的自动初判，结论随实测与限值
+        verdictsToPut.push({
+          id: `vrd_${id}`,
+          pointId: id,
+          result: judgePoint(row.measuredOhm, effectiveLimit),
+          basis: defaultBasis(protectionClass, deviceType, effectiveLimit),
+          inspector: '',
+          verdictDate: meta.measureDate,
+          confirmed: false,
+          createdAt: now + index,
+          updatedAt: now + index
+        })
+        createdCodes.push(row.code.trim())
+        continue
+      }
+
+      matchedIds.add(old.id)
+      // 粘贴位置为空时保留台账原位置，不抹掉
+      const location = row.location === '' ? old.location : row.location
+      const valueChanged = old.measuredOhm !== row.measuredOhm || old.limitOhm !== effectiveLimit
+      const locationChanged = location !== old.location
+      if (!valueChanged && !locationChanged) {
+        retainedCodes.push(old.code)
+        continue
+      }
+
+      pointsToPut.push({
+        ...old,
+        location,
+        measuredOhm: row.measuredOhm,
+        limitOhm: effectiveLimit,
+        updatedAt: now + index
+      })
+      updatedCodes.push(old.code)
+
+      if (valueChanged) {
+        const verdict = verdictByPoint.get(old.id)
+        if (verdict) {
+          // 实测或限值变化：结果与依据按新值重算；已确认的撤销确认回退待确认，未确认的仅刷新初判
+          const wasConfirmed = verdict.confirmed
+          verdictsToPut.push({
+            ...verdict,
+            result: judgePoint(row.measuredOhm, effectiveLimit),
+            basis: defaultBasis(protectionClass, deviceType, effectiveLimit),
+            confirmed: false,
+            updatedAt: now + index
+          })
+          if (wasConfirmed) revokedCodes.push(old.code)
+        }
+      }
+    }
+
+    if (pointsToPut.length > 0) await db.points.bulkPut(pointsToPut)
+    if (verdictsToPut.length > 0) await db.verdicts.bulkPut(verdictsToPut)
   })
-  return records.length
+
+  // 粘贴中未出现的旧测点同样保留在台账
+  existing.forEach((point) => {
+    if (!matchedIds.has(point.id)) retainedCodes.push(point.code)
+  })
+
+  return {
+    created: createdCodes.length,
+    updated: updatedCodes.length,
+    retained: retainedCodes.length,
+    rejected: 0,
+    applied: true,
+    createdCodes,
+    updatedCodes,
+    retainedCodes,
+    revokedVerdictCodes: revokedCodes
+  }
+}
+
+/**
+ * 整批未受理时的结果：不写任何数据，全部粘贴行计入未受理，现有测点全部保留。
+ * 供页面在解析存在冲突行时给出与成功导入一致口径的统计。
+ */
+export function rejectedImportResult(rowCount: number, existingCount: number): PointImportResult {
+  return {
+    created: 0,
+    updated: 0,
+    retained: existingCount,
+    rejected: rowCount,
+    applied: false,
+    createdCodes: [],
+    updatedCodes: [],
+    retainedCodes: [],
+    revokedVerdictCodes: []
+  }
 }
