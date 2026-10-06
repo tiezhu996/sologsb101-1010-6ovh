@@ -1,0 +1,19 @@
+# 防雷装置检测与接地电阻台账 · Docker Compose 一键部署
+# 纯前端 SPA：无后端 / 无数据库服务 / 无命名卷，数据只存浏览器 IndexedDB。
+# 顶层 name 兜底：避免中文目录名导致 compose 项目名为空（注意：不写 version 字段）。
+name: gblightprot
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-gblightprot}-frontend:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-gblightprot}-frontend
+    restart: unless-stopped
+    ports:
+      # 宿主端口可用 .env 的 FRONTEND_PORT 覆盖，默认 22810
+      - "${FRONTEND_PORT:-22810}:80"
+    environment:
+      - TZ=Asia/Shanghai
+    # 容器无状态：不使用数据库服务、不挂载命名卷

@@ -1,0 +1,321 @@
+/* 防雷装置检测与接地电阻台账 · 全局样式
+   Tailwind CSS v4 入口 + 项目主题变量与通用类。 */
+@import 'tailwindcss';
+
+@theme {
+  --color-brand: #1d3557;
+  --color-brand-light: #457b9d;
+  --color-brand-cyan: #7fd1e8;
+  --color-brand-sun: #ffd166;
+  --color-ok: #1e8449;
+  --color-warn: #d68910;
+  --color-bad: #c0392b;
+  --font-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+}
+
+:root {
+  --gb-ink: #16232e;
+  --gb-line: #dfe4ea;
+  --gb-panel: #ffffff;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #f2f6f9;
+  color: var(--gb-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 通用面板 */
+.gb-panel {
+  background: var(--gb-panel);
+  border: 1px solid var(--gb-line);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 2px 10px rgba(29, 53, 87, 0.06);
+}
+
+.gb-panel + .gb-panel {
+  margin-top: 16px;
+}
+
+.gb-panel-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.gb-panel-title h2,
+.gb-panel-title h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-brand);
+}
+
+.gb-brand-bar {
+  height: 4px;
+  border-radius: 4px;
+  margin-bottom: 14px;
+  background: linear-gradient(90deg, var(--color-brand), var(--color-brand-cyan) 55%, var(--color-brand));
+}
+
+/* 通用按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--color-brand);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: #f2f6fa;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  color: #ffffff;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: #16304f;
+}
+
+.btn--success {
+  background: var(--color-ok);
+  border-color: var(--color-ok);
+  color: #ffffff;
+}
+
+.btn--danger {
+  background: #ffffff;
+  border-color: var(--color-bad);
+  color: var(--color-bad);
+}
+
+.btn--small {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+/* 表格 */
+.gb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.gb-table th,
+.gb-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--gb-line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.gb-table th {
+  background: #f7fafc;
+  color: #445566;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gb-table tbody tr:hover {
+  background: #f9fbfd;
+}
+
+.gb-table td.is-num,
+.gb-table th.is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gb-mono {
+  font-family: 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.gb-hint {
+  font-size: 12px;
+  color: #8194a2;
+  line-height: 1.75;
+}
+
+.gb-danger {
+  color: var(--color-bad);
+  font-weight: 600;
+}
+
+/* 表单 */
+.gb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gb-field span {
+  font-size: 12px;
+  color: #5b6b78;
+}
+
+.gb-field input,
+.gb-field select,
+.gb-field textarea {
+  padding: 6px 10px;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: inherit;
+  background: #ffffff;
+}
+
+.gb-field input:focus,
+.gb-field select:focus,
+.gb-field textarea:focus {
+  outline: 2px solid rgba(69, 123, 157, 0.35);
+  border-color: var(--color-brand-light);
+}
+
+/* 弹窗 */
+.gb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow: auto;
+  background: rgba(22, 35, 46, 0.45);
+}
+
+.gb-modal {
+  width: min(620px, 100%);
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(22, 35, 46, 0.28);
+}
+
+.gb-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--gb-line);
+}
+
+.gb-modal__head h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--color-brand);
+}
+
+.gb-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.gb-modal__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.gb-modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--gb-line);
+}
+
+.gb-modal__close {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  color: #8194a2;
+  cursor: pointer;
+}
+
+/* 统计行 */
+.gb-stats-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.gb-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid #cfd8e3;
+  background: #f7fafc;
+  color: #445566;
+  font-size: 12px;
+}
+
+.gb-alert {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #f0c78a;
+  background: #fff8ec;
+  color: #8a5a12;
+  font-size: 13px;
+}
+
+.gb-grid-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
+}
+
+.gb-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: #ffffff;
+  border: 1px solid var(--gb-line);
+  border-left: 4px solid var(--color-brand);
+  border-radius: 10px;
+}
+
+.gb-card.is-bad {
+  border-left-color: var(--color-bad);
+}
+
+.gb-card.is-ok {
+  border-left-color: var(--color-ok);
+}
+
+@media (max-width: 900px) {
+  .gb-panel {
+    padding: 12px;
+  }
+}

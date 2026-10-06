@@ -1,0 +1,26 @@
+{
+  "name": "gblightprot-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "防雷装置检测与接地电阻台账 - 纯前端 SPA（Svelte 5 + TypeScript + Vite + Svelte SPA Router + Tailwind CSS + Dexie）",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "preview": "vite preview --port 22810",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "dependencies": {
+    "dexie": "^4.0.11"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.1.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/node": "^22.20.4",
+    "svelte": "^5.20.0",
+    "svelte-check": "^4.1.4",
+    "tailwindcss": "^4.1.14",
+    "typescript": "~5.7.3",
+    "vite": "^6.1.0"
+  }
+}
