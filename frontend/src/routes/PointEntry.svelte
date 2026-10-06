@@ -12,7 +12,7 @@
     activeDeviceId,
     bulkSetMeasured,
     createPoint,
-    importPointRows,
+    mergePointRows,
     pasteText,
     pointList,
     pointRows,
@@ -22,7 +22,7 @@
     updatePoint
   } from '$lib/stores/pointStore.ts'
   import { buildingById, deviceList, selectBuilding } from '$lib/stores/buildingStore.ts'
-  import { parsePointPaste } from '$lib/types/point.ts'
+  import { normalizePointCode, parsePointPaste } from '$lib/types/point.ts'
   import type { Point, PointPasteRow } from '$lib/types/point.ts'
   import { DEVICE_TYPES } from '$lib/types/device.ts'
   import type { DeviceType } from '$lib/types/device.ts'
@@ -56,6 +56,11 @@
   let showPaste = $state(false)
   let pasteErrors = $state<string[]>([])
   let pastePreview = $state<PointPasteRow[]>([])
+  /** 本次解析的非空行数；整批不受理时即未受理数量 */
+  let pasteTotalLines = $state(0)
+  /** 导入结果通知（成功：四项计数；失败：未受理数量） */
+  let importNotice = $state('')
+  let importNoticeTone = $state<'ok' | 'warn'>('ok')
   let bulkValue = $state<number | null>(null)
 
   let form = $state<PointForm>({
@@ -192,13 +197,33 @@
     pasteText.set('')
     pasteErrors = []
     pastePreview = []
+    pasteTotalLines = 0
+    importNotice = ''
     showPaste = true
   }
 
+  /** 预览行与当前台账的核对结果（编号 trim 后忽略大小写）：同编号更新，否则新增 */
+  const pastePlan = $derived(
+    pastePreview.map((row) => {
+      const existing = $activeDeviceId
+        ? pointsOfDevice($activeDeviceId).find((point) => normalizePointCode(point.code) === normalizePointCode(row.code))
+        : undefined
+      return { row, mode: existing ? ('更新' as const) : ('新增' as const), existing }
+    })
+  )
+
+  const pasteSummary = $derived({
+    create: pastePlan.filter((item) => item.mode === '新增').length,
+    update: pastePlan.filter((item) => item.mode === '更新').length,
+    keep: $activeDeviceId ? pointsOfDevice($activeDeviceId).length - pastePlan.filter((item) => item.mode === '更新').length : 0
+  })
+
   function previewPaste(): void {
+    importNotice = ''
     const parsed = parsePointPaste($pasteText, defaultLimit)
     pasteErrors = parsed.errors
     pastePreview = parsed.rows
+    pasteTotalLines = parsed.totalLines
   }
 
   async function submitPaste(): Promise<void> {
@@ -206,15 +231,28 @@
     const parsed = parsePointPaste($pasteText, defaultLimit)
     pasteErrors = parsed.errors
     pastePreview = parsed.rows
-    if (parsed.rows.length === 0) return
+    pasteTotalLines = parsed.totalLines
+    // 同一批重复编号或任一行格式、数值有错：列出冲突行且不写数据
+    if (parsed.totalLines === 0) {
+      importNoticeTone = 'warn'
+      importNotice = '粘贴内容为空，未导入任何数据。'
+      return
+    }
+    if (parsed.errors.length > 0 || parsed.rows.length === 0) {
+      importNoticeTone = 'warn'
+      importNotice = `本次 ${parsed.totalLines} 行手记未受理（存在 ${parsed.errors.length} 行冲突 / 错误），未写入任何数据；现有 ${pointsOfDevice($activeDeviceId).length} 个旧测点均已保留。`
+      return
+    }
     const ok = window.confirm(
-      `将用 ${parsed.rows.length} 行数据替换该装置现有 ${pointsOfDevice($activeDeviceId).length} 个测点，确认导入？`
+      `手记将补入当前装置：新增 ${pasteSummary.create} 点、更新 ${pasteSummary.update} 点、台账保留 ${pasteSummary.keep} 点，确认导入？`
     )
     if (!ok) return
-    await importPointRows($activeDeviceId, parsed.rows, {
+    const result = await mergePointRows($activeDeviceId, parsed.rows, {
       meter: pointsOfDevice($activeDeviceId)[0]?.meter ?? '未填写',
       measureDate: new Date().toISOString().slice(0, 10)
     })
+    importNoticeTone = 'ok'
+    importNotice = `手记导入完成：新增 ${result.created} 点、更新 ${result.updated} 点、保留 ${result.kept} 点、未受理 ${result.rejected} 行。`
     showPaste = false
   }
 
@@ -249,7 +287,7 @@
     <div>
       <h2 class="page__title">接地电阻测点录入</h2>
       <p class="gb-hint">
-        按装置逐点录入实测电阻与限值，可批量粘贴整段手记数据；实测值 ≤ 限值判合格，超限会即时标红。
+        按装置逐点录入实测电阻与限值，可批量粘贴整段手记数据；粘贴按编号核对补入台账，同编号更新、未出现的旧测点保留，实测或限值变化的测点需重新确认判定。
       </p>
       {#if activeDevice}
         <p class="gb-hint">
@@ -263,6 +301,10 @@
       <button class="btn btn--primary" type="button" onclick={openCreate}>＋ 新增测点</button>
     </div>
   </div>
+
+  {#if importNotice}
+    <p class="gb-alert gb-alert--ok" class:gb-alert--warn={importNoticeTone === 'warn'}>{importNotice}</p>
+  {/if}
 
   <FilterBar
     keyword={keyword}
@@ -292,7 +334,7 @@
     <div class="gb-panel">
       <div class="gb-panel-title">
         <h3>批量录入</h3>
-        <span class="gb-hint">适合野外手记一次性录入：统一改写实测值，或整段粘贴导入。</span>
+        <span class="gb-hint">适合野外手记一次性录入：统一改写实测值，或整段粘贴按编号补入当前装置（不替换旧测点）。</span>
       </div>
       <div class="bulk-row">
         <label class="gb-field">
@@ -443,7 +485,7 @@
       </div>
       <div class="gb-modal__body">
         <p class="gb-hint">
-          每行一条，格式「测点编号,位置,实测电阻[,限值]」，逗号 / 制表符 / 分号均可。示例：<br />
+          每行一条，格式「测点编号,位置,实测电阻[,限值]」，逗号 / 制表符 / 分号均可；按编号（去首尾空格、忽略大小写）与当前装置台账核对：同编号更新位置 / 实测 / 限值，未写限值按当前防雷类别与装置类型重算，位置为空保留原位置；粘贴中未出现的旧测点继续留在台账。示例：<br />
           <span class="gb-mono">JD-07,罐区东侧测试井,3.8,4</span><br />
           <span class="gb-mono">JD-08;罐区西侧测试井;5.6;4</span>
         </p>
@@ -458,33 +500,51 @@
         </label>
         {#if pasteErrors.length > 0}
           <div class="errors">
+            <p class="gb-alert gb-alert--warn">
+              以下 {pasteErrors.length} 行冲突 / 有误（同一批重复编号或任一行格式、数值有错），整批不受理、不写数据：
+            </p>
             {#each pasteErrors as error, index (index)}
-              <p class="gb-alert">{error}</p>
+              <p class="gb-alert gb-alert--warn">{error}</p>
             {/each}
           </div>
         {/if}
         {#if pastePreview.length > 0}
           <table class="gb-table">
             <thead>
-              <tr><th>编号</th><th>位置</th><th class="is-num">实测</th><th class="is-num">限值</th></tr>
+              <tr><th>处理</th><th>编号</th><th>位置</th><th class="is-num">实测</th><th class="is-num">限值</th></tr>
             </thead>
             <tbody>
-              {#each pastePreview as row, index (index)}
+              {#each pastePlan as item, index (index)}
                 <tr>
-                  <td class="gb-mono">{row.code}</td>
-                  <td>{row.location}</td>
-                  <td class="is-num gb-mono">{row.measuredOhm}</td>
-                  <td class="is-num gb-mono">{row.limitOhm}</td>
+                  <td><span class="gb-tag">{item.mode}</span></td>
+                  <td class="gb-mono">{item.row.code}</td>
+                  <td>{item.row.location || (item.existing?.location ?? '—')}{#if !item.row.location && item.existing}<span class="gb-hint">（沿用原位置）</span>{/if}</td>
+                  <td class="is-num gb-mono">{item.row.measuredOhm}</td>
+                  <td class="is-num gb-mono">
+                    {item.row.limitOhm}
+                    {#if !item.row.hasLimit}<span class="gb-hint">（重算）</span>{/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
           </table>
+          <p class="gb-hint">
+            核对结果：新增 {pasteSummary.create} 点、更新 {pasteSummary.update} 点、保留 {pasteSummary.keep} 点。
+            实测或限值发生变化的更新点，已确认的判定将撤销确认（判定记录保留），数值无变化则保留确认。
+          </p>
         {/if}
       </div>
       <div class="gb-modal__foot">
         <button class="btn" type="button" onclick={() => (showPaste = false)}>取消</button>
         <button class="btn" type="button" onclick={previewPaste}>解析预览</button>
-        <button class="btn btn--primary" type="button" onclick={submitPaste}>覆盖导入</button>
+        <button
+          class="btn btn--primary"
+          type="button"
+          onclick={submitPaste}
+          disabled={pastePreview.length === 0}
+        >
+          补充导入{pastePreview.length > 0 ? `（新增 ${pasteSummary.create} / 更新 ${pasteSummary.update}）` : ''}
+        </button>
       </div>
     </div>
   </div>
@@ -540,6 +600,18 @@
     gap: 6px;
     max-height: 160px;
     overflow: auto;
+  }
+
+  .gb-alert--ok {
+    border-color: #b7dfc4;
+    background: #f0fbf4;
+    color: #1f6b3a;
+  }
+
+  .gb-alert--warn {
+    border-color: #f0c78a;
+    background: #fff8ec;
+    color: #8a5a12;
   }
 
   .link {

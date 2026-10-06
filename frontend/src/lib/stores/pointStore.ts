@@ -6,11 +6,11 @@
  * 装置维度的测点统计（同时依赖两个 store）已下沉到 stores/pointStats.ts，避免循环依赖。
  */
 import { derived, get, writable } from 'svelte/store'
-import { db, watchTable } from '$lib/utils/db'
-import type { Point, PointDraft } from '$lib/types/point'
-import { createEmptyPointDraft } from '$lib/types/point'
-import { deviceList } from '$lib/stores/buildingStore'
-import { isQualified, limitRatio } from '$lib/utils/resistance'
+import { createId, db, watchTable } from '$lib/utils/db'
+import type { Point, PointDraft, PointPasteRow } from '$lib/types/point'
+import { createEmptyPointDraft, normalizePointCode } from '$lib/types/point'
+import { buildingById, deviceList } from '$lib/stores/buildingStore'
+import { isQualified, limitRatio, suggestLimitOhm } from '$lib/utils/resistance'
 
 /** 响应式测点集合 */
 export const pointList = writable<Point[]>([])
@@ -110,30 +110,92 @@ export async function bulkSetMeasured(deviceId: string, measuredOhm: number): Pr
   return pointsOfDevice(deviceId).length
 }
 
-/** 批量导入解析后的粘贴行（替换该装置原有测点） */
-export async function importPointRows(
+/** 手记补充导入结果：新增 / 更新 / 台账保留 / 未受理（解析失败时由调用方统计） */
+export interface PointMergeResult {
+  created: number
+  updated: number
+  kept: number
+  rejected: number
+}
+
+/**
+ * 把手记粘贴行合并进指定防雷装置（不做整装置替换）：
+ * - 编号去首尾空格后忽略大小写与台账匹配；同编号更新位置、实测、限值；
+ * - 行内未写限值时按当前防雷类别与装置类型重算；位置为空不抹掉原位置；
+ * - 未出现在粘贴内容里的旧测点全部保留；
+ * - 同编号测点实测或限值发生变化时撤销其判定确认（判定记录保留），无变化则保留确认；
+ * - 新测点沿用装置既有检测仪器与本次检测日期；新增点暂无判定记录，到判定页再初判。
+ */
+export async function mergePointRows(
   deviceId: string,
-  rows: Array<{ code: string; location: string; measuredOhm: number; limitOhm: number }>,
+  rows: PointPasteRow[],
   meta: { meter: string; measureDate: string }
-): Promise<number> {
+): Promise<PointMergeResult> {
+  const device = get(deviceList).find((item) => item.id === deviceId)
+  if (!device) return { created: 0, updated: 0, kept: 0, rejected: rows.length }
+  const building = buildingById(device.buildingId)
+  const defaultLimitOhm = suggestLimitOhm(building?.protectionClass ?? '三类', device.type)
+
+  const existing = get(pointList).filter((point) => point.deviceId === deviceId)
+  const byCode = new Map(existing.map((point) => [normalizePointCode(point.code), point]))
+
   const now = Date.now()
-  const records: Point[] = rows.map((row, index) => ({
-    id: `pnt_${Date.now().toString(36)}${index}${Math.random().toString(36).slice(2, 6)}`,
-    deviceId,
-    code: row.code,
-    location: row.location,
-    measuredOhm: row.measuredOhm,
-    limitOhm: row.limitOhm,
-    meter: meta.meter,
-    measureDate: meta.measureDate,
-    createdAt: now + index,
-    updatedAt: now + index
-  }))
-  await db.transaction('rw', [db.points, db.verdicts], async () => {
-    const oldIds = (await db.points.where('deviceId').equals(deviceId).toArray()).map((row) => row.id)
-    if (oldIds.length > 0) await db.verdicts.where('pointId').anyOf(oldIds).delete()
-    await db.points.where('deviceId').equals(deviceId).delete()
-    await db.points.bulkPut(records)
+  const toCreate: Point[] = []
+  const toUpdate: Point[] = []
+  /** 需要撤销判定确认的测点 id（实测或限值已变化） */
+  const verdictToRevoke: string[] = []
+  const matched = new Set<string>()
+
+  rows.forEach((row, index) => {
+    const limitOhm = row.hasLimit ? row.limitOhm : defaultLimitOhm
+    const found = byCode.get(normalizePointCode(row.code))
+    if (!found) {
+      toCreate.push({
+        id: createId('pnt'),
+        deviceId,
+        code: row.code,
+        location: row.location,
+        measuredOhm: row.measuredOhm,
+        limitOhm,
+        meter: meta.meter,
+        measureDate: meta.measureDate,
+        createdAt: now + index,
+        updatedAt: now + index
+      })
+      return
+    }
+    matched.add(found.id)
+    const resistanceChanged = found.measuredOhm !== row.measuredOhm || found.limitOhm !== limitOhm
+    toUpdate.push({
+      ...found,
+      // 位置为空不抹掉原位置
+      location: row.location.trim() ? row.location : found.location,
+      measuredOhm: row.measuredOhm,
+      limitOhm,
+      updatedAt: now + index
+    })
+    if (resistanceChanged) verdictToRevoke.push(found.id)
   })
-  return records.length
+
+  await db.transaction('rw', [db.points, db.verdicts], async () => {
+    if (toCreate.length > 0) await db.points.bulkPut(toCreate)
+    if (toUpdate.length > 0) await db.points.bulkPut(toUpdate)
+    // 实测或限值变化：撤销判定确认（判定记录保留，检测人重新初判/确认后再生效）
+    if (verdictToRevoke.length > 0) {
+      await db.verdicts
+        .where('pointId')
+        .anyOf(verdictToRevoke)
+        .modify((verdict) => {
+          verdict.confirmed = false
+          verdict.updatedAt = now
+        })
+    }
+  })
+
+  return {
+    created: toCreate.length,
+    updated: toUpdate.length,
+    kept: existing.length - matched.size,
+    rejected: 0
+  }
 }
